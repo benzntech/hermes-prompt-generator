@@ -146,12 +146,16 @@ def test_backend_host_available(pg, no_env_cli, monkeypatch):
     assert "host" in pg._available_backends()
 
 
-def test_backend_prefers_cli(pg, no_env_cli, monkeypatch):
+def test_backend_prefers_host(pg, no_env_cli, monkeypatch):
     monkeypatch.setenv("PROMPT_GENERATOR_CLI", "/usr/bin/true")
     host = _fake_host()
     monkeypatch.setattr(pg, "_ctx", FakeCtx(llm=host))
     backends = pg._available_backends()
     assert set(backends) == {"cli", "host"}
+    # Host (Hermes LLM) is the default engine; cli is opt-in.
+    out = pg._run_generic("hello")
+    assert out == "Host response."
+    assert len(host.calls) == 1
 
 
 def test_backend_none(pg, no_env_cli, monkeypatch):

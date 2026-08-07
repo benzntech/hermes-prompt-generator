@@ -1,15 +1,13 @@
-"""prompt-generator plugin — structured prompt generation, generic backends.
+"""prompt-generator plugin — structured prompt generation on the Hermes LLM.
 
-Backends (no vendor names, no external services, no extra API keys):
-  cli  — external CLI delegation: runs ``<bin> -p "<prompt>"`` and relays
-         stdout. Binary configured via the PROMPT_GENERATOR_CLI env var
-         (the user's own installed CLI — the same safe subprocess pattern
-         used for codex/claude-style delegation; Hermes only sends text
-         and reads stdout, it never reads any OAuth token).
-  host — the session's configured model via ``ctx.llm``.
+Backend (no vendor names, no external services, no extra API keys):
+  host — the Hermes host LLM via ``ctx.llm`` (the session's configured
+         model). This is the PRIMARY engine.
+  cli  — optional external CLI delegation: runs ``<bin> -p "<prompt>"`` and
+         relays stdout. Binary configured via the PROMPT_GENERATOR_CLI env
+         var. Opt-in with ``--backend cli``.
 
-Preference: cli (when PROMPT_GENERATOR_CLI is set) > host. ``--backend``
-forces a choice.
+Preference: host (Hermes LLM) by default; ``--backend`` forces a choice.
 
 Commands:
     /prompt-gen <idea> [--framework race|care|ape|create|tag|creo|rise|pain|coast|roses|react|costar] [--claude|--gpt|--midjourney|--flux|--sd] [--backend cli|host]
@@ -110,7 +108,9 @@ def _run_generic(prompt: str, forced: str | None = None) -> str:
         )
     key = (forced or "").strip().lower()
     if not key:
-        key = "cli" if "cli" in backends else "host"
+        # Preference: the Hermes host LLM (ctx.llm) is the primary engine;
+        # the configured CLI is an explicit opt-in via --backend cli.
+        key = "host" if "host" in backends else "cli"
     if key not in backends:
         return (
             f"prompt-generator: backend '{key}' not available "
@@ -370,9 +370,9 @@ def register(ctx) -> None:
         description=(
             "Generate a structured prompt from a rough idea using any of the "
             "12 Prompt-Framework templates (race, care, ape, create, tag, "
-            "creo, rise, pain, coast, roses, react, costar). Backend: "
-            "configured CLI (PROMPT_GENERATOR_CLI) or host model; optional "
-            "--claude|--gpt|--midjourney|--flux|--sd."
+            "creo, rise, pain, coast, roses, react, costar). Runs on the "
+            "Hermes host LLM by default; optional --claude|--gpt|"
+            "--midjourney|--flux|--sd."
         ),
         args_hint="<idea> [--framework race|care|ape|create|tag|creo|rise|pain|coast|roses|react|costar] [--claude|--gpt|--midjourney|--flux|--sd] [--backend cli|host]",
     )
@@ -381,7 +381,7 @@ def register(ctx) -> None:
         handler=_handle_prompt_gen_image,
         description=(
             "Turn an image into a paste-ready image-generation prompt "
-            "(Midjourney/FLUX/SD). Backend: configured CLI or host model."
+            "(Midjourney/FLUX/SD). Runs on the Hermes host LLM by default."
         ),
         args_hint="<image_path> [--midjourney|--flux|--sd] [--backend cli|host]",
     )
