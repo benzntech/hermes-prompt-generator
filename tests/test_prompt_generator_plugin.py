@@ -54,15 +54,24 @@ def pg():
 
 
 class FakeCtx:
-    def __init__(self, llm=None):
+    def __init__(self, llm=None, vision_response=None):
         self.hooks = {}
         self.commands = {}
         # llm emulates the real PluginLlm facade: an object with .complete()
         self._llm = types.SimpleNamespace(complete=llm) if llm is not None else None
+        # vision_response emulates vision_analyze tool output (JSON string).
+        self._vision_response = vision_response
 
     @property
     def llm(self):
         return self._llm
+
+    def dispatch_tool(self, tool_name, args, **kwargs):
+        self.dispatched = getattr(self, "dispatched", [])
+        self.dispatched.append((tool_name, args, kwargs))
+        if self._vision_response is not None:
+            return self._vision_response
+        raise RuntimeError(f"no fake response for tool {tool_name}")
 
     def register_hook(self, name, callback):
         self.hooks.setdefault(name, []).append(callback)
@@ -70,6 +79,12 @@ class FakeCtx:
     def register_command(self, name, handler, description="", args_hint=""):
         self.commands[name] = {"handler": handler, "args_hint": args_hint,
                                "description": description}
+
+
+_VISION_JSON = (
+    '{"success": true, "analysis": "A cyberpunk city at night, neon signs, '
+    'rain-soaked streets --ar 16:9 --stylize 250"}'
+)
 
 
 def _fake_cli(result_text="Generated prompt here."):
@@ -309,61 +324,88 @@ def test_prompt_gen_no_backend(pg, no_env_cli, monkeypatch):
 
 
 def test_prompt_gen_image_no_args(pg, no_env_cli, monkeypatch):
-    monkeypatch.setenv("PROMPT_GENERATOR_CLI", "/usr/bin/true")
     out = pg._handle_prompt_gen_image("")
     assert "Usage:" in out
 
 
 def test_prompt_gen_image_missing_file(pg, no_env_cli, monkeypatch):
-    monkeypatch.setenv("PROMPT_GENERATOR_CLI", "/usr/bin/true")
     out = pg._handle_prompt_gen_image("/nonexistent/img.png")
     assert "Image not found" in out
 
 
-def test_prompt_gen_image_runs_vision(pg, no_env_cli, monkeypatch, tmp_path):
+def test_prompt_gen_image_uses_hermes_vision(pg, no_env_cli, monkeypatch, tmp_path):
     img = tmp_path / "photo.png"
     img.write_bytes(b"fake-png")
-    fake = _fake_cli("A detailed Midjourney prompt.")
-    monkeypatch.setattr(pg, "_cli_backend", lambda: fake)
-    monkeypatch.setattr(pg, "_ctx", None)
+    ctx = FakeCtx(vision_response=_VISION_JSON)
+    monkeypatch.setattr(pg, "_ctx", ctx)
     out = pg._handle_prompt_gen_image(str(img))
-    assert out == "A detailed Midjourney prompt."
-    prompt, model = fake.calls[0]
-    assert "Image:" in prompt
-    assert str(img) in prompt
-    assert "Midjourney" in prompt  # default style
-    assert model is None
+    assert "cyberpunk city" in out  # analysis text extracted
+    assert ctx.dispatched and ctx.dispatched[0][0] == "vision_analyze"
+    tool_args = ctx.dispatched[0][1]
+    assert tool_args["image_url"] == str(img)
+    assert "Midjourney" in tool_args["question"]  # default style
 
 
 def test_prompt_gen_image_style_flux(pg, no_env_cli, monkeypatch, tmp_path):
     img = tmp_path / "photo.png"
     img.write_bytes(b"fake-png")
-    fake = _fake_cli("FLUX prompt.")
-    monkeypatch.setattr(pg, "_cli_backend", lambda: fake)
+    ctx = FakeCtx(vision_response=_VISION_JSON)
+    monkeypatch.setattr(pg, "_ctx", ctx)
     pg._handle_prompt_gen_image(f"{img} --flux")
-    prompt, _ = fake.calls[0]
-    assert "FLUX.1" in prompt
+    tool_args = ctx.dispatched[0][1]
+    assert "FLUX.1" in tool_args["question"]
 
 
 def test_prompt_gen_image_style_sd(pg, no_env_cli, monkeypatch, tmp_path):
     img = tmp_path / "photo.png"
     img.write_bytes(b"fake-png")
-    fake = _fake_cli("SD prompt.")
-    monkeypatch.setattr(pg, "_cli_backend", lambda: fake)
+    ctx = FakeCtx(vision_response=_VISION_JSON)
+    monkeypatch.setattr(pg, "_ctx", ctx)
     pg._handle_prompt_gen_image(f"{img} --sd")
-    prompt, _ = fake.calls[0]
-    assert "Stable Diffusion" in prompt
+    tool_args = ctx.dispatched[0][1]
+    assert "Stable Diffusion" in tool_args["question"]
 
 
-def test_prompt_gen_image_host_fallback(pg, no_env_cli, monkeypatch, tmp_path):
+def test_prompt_gen_image_vision_failure(pg, no_env_cli, monkeypatch, tmp_path):
     img = tmp_path / "photo.png"
     img.write_bytes(b"fake-png")
-    host = _fake_host("Host image prompt.")
-    monkeypatch.setattr(pg, "_cli_backend", lambda: None)
-    monkeypatch.setattr(pg, "_ctx", FakeCtx(llm=host))
+    ctx = FakeCtx(vision_response='{"success": false, "analysis": "boom"}')
+    monkeypatch.setattr(pg, "_ctx", ctx)
     out = pg._handle_prompt_gen_image(str(img))
-    assert out == "Host image prompt."
-    assert len(host.calls) == 1
+    assert "vision failed: boom" in out
+
+
+def test_prompt_gen_image_no_ctx(pg, no_env_cli, monkeypatch, tmp_path):
+    img = tmp_path / "photo.png"
+    img.write_bytes(b"fake-png")
+    monkeypatch.setattr(pg, "_ctx", None)
+    out = pg._handle_prompt_gen_image(str(img))
+    assert "no vision routing available" in out
+
+
+def test_prompt_gen_image_backend_cli(pg, no_env_cli, monkeypatch, tmp_path):
+    img = tmp_path / "photo.png"
+    img.write_bytes(b"fake-png")
+    fake = _fake_cli("CLI image prompt.")
+    monkeypatch.setattr(pg, "_cli_backend", lambda: fake)
+    monkeypatch.setattr(pg, "_ctx", FakeCtx(vision_response=_VISION_JSON))
+    out = pg._handle_prompt_gen_image(f"{img} --backend cli")
+    assert out == "CLI image prompt."
+    assert len(fake.calls) == 1
+    prompt, _ = fake.calls[0]
+    assert "Image:" in prompt and str(img) in prompt
+
+
+def test_extract_vision_analysis_json(pg):
+    assert "cyberpunk city" in pg._extract_vision_analysis(_VISION_JSON)
+
+
+def test_extract_vision_analysis_raw_text(pg):
+    assert pg._extract_vision_analysis("plain analysis text") == "plain analysis text"
+
+
+def test_extract_vision_analysis_empty(pg):
+    assert "(vision produced no output)" in pg._extract_vision_analysis("")
 
 
 # ---------------------------------------------------------------------------

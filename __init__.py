@@ -15,7 +15,8 @@ Commands:
            (RACE default)
     /prompt-gen-image <image> [--midjourney|--flux|--sd] [--backend cli|host]
         -> vision description of the image assembled into a paste-ready
-           image-generation prompt
+           image-generation prompt; default engine is Hermes' configured
+           vision model (vision_analyze routing)
 
 Bypass prefixes: /quick, *simple, #basic (same convention as prompt-optimizer).
 """
@@ -351,8 +352,55 @@ def _handle_prompt_gen_image(raw_args: str) -> str:
     if not _os.path.isfile(_os.path.expanduser(image)):
         return f"Image not found: {image}"
     question = _IMAGE_GEN_QUESTIONS.get(style, _IMAGE_FALLBACK_QUESTION)
-    prompt = f"{question}\n\nImage: {image}"
-    return _run_generic(prompt, flags.get("backend"))
+    backend = (flags.get("backend") or "").strip().lower()
+    if backend == "cli":
+        # Explicit opt-in: the raw CLI path (no vision routing).
+        return _run_generic(f"{question}\n\nImage: {image}", forced="cli")
+    # Default: dispatch through Hermes' vision_analyze tool, which routes via
+    # the vision model configured in Hermes (auxiliary.vision — or whatever
+    # override is registered, e.g. a CLI vision backend). The host LLM may
+    # not be multimodal, so the configured vision model is the right engine
+    # for the image path.
+    if _ctx is None or not hasattr(_ctx, "dispatch_tool"):
+        return (
+            "prompt-generator: no vision routing available. Set "
+            "--backend cli with PROMPT_GENERATOR_CLI configured, or run "
+            "inside a Hermes session with a vision model configured."
+        )
+    try:
+        raw = _ctx.dispatch_tool(
+            "vision_analyze",
+            {"image_url": image, "question": question},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("prompt-generator: vision_analyze dispatch failed: %s", exc)
+        return f"prompt-generator: vision dispatch failed: {exc}"
+    return _extract_vision_analysis(raw)
+
+
+def _extract_vision_analysis(raw) -> str:
+    """Parse the vision_analyze tool response into plain text.
+
+    vision_analyze returns a JSON string {"success": bool, "analysis": str};
+    tolerate raw text responses (some backends return analysis directly).
+    """
+    import json as _json
+
+    if not raw:
+        return "(vision produced no output)"
+    if isinstance(raw, str):
+        text = raw.strip()
+        try:
+            payload = _json.loads(text)
+        except ValueError:
+            return text  # not JSON — plain analysis text
+        if isinstance(payload, dict):
+            if payload.get("success") is False:
+                return f"vision failed: {payload.get('analysis', 'unknown error')}"
+            analysis = payload.get("analysis", "")
+            return analysis.strip() or "(vision produced no output)"
+        return text
+    return str(raw).strip() or "(vision produced no output)"
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +429,8 @@ def register(ctx) -> None:
         handler=_handle_prompt_gen_image,
         description=(
             "Turn an image into a paste-ready image-generation prompt "
-            "(Midjourney/FLUX/SD). Runs on the Hermes host LLM by default."
+            "(Midjourney/FLUX/SD). Uses Hermes' configured vision model by "
+            "default; --backend cli opts into the raw CLI path."
         ),
         args_hint="<image_path> [--midjourney|--flux|--sd] [--backend cli|host]",
     )
