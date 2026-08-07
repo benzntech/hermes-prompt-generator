@@ -1,0 +1,4 @@
+name: prompt-generator
+version: 1.0.0
+description: "Structured prompt generator — idea→prompt and image→prompt (Midjourney/Flux/SD), routed through the user's agy-vision config."
+author: "Tech Altar"
